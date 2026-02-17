@@ -1,65 +1,110 @@
 import requests
 import re
 
-# 配置你的两个直播源网址
+# ========== 配置区域 ==========
+# 你可以在这里添加、删除或修改源 URL，支持任意数量
 SOURCE_URLS = [
     "https://raw.githubusercontent.com/mytv-android/BRTV-Live-M3U8/refs/heads/main/iptv.m3u",
-    "https://raw.githubusercontent.com/liniani/BRTV-Live-M3U8/refs/heads/main/cctv.m3u"
+    "https://raw.githubusercontent.com/liniani/BRTV-Live-M3U8/refs/heads/main/cctv.m3u",
+    # 添加第三个源：
+    # "https://example.com/other.m3u",
+    # 添加第四个源：
+    # "https://example.com/more.m3u",
 ]
-OUTPUT_FILE = "live.m3u" # 最终合并后存入仓库的文件名
+
+OUTPUT_FILE = "live.m3u"
+
+# 分组显示顺序：北京 → 央视 → 卫视 → 地方 → 其他 → 未分组
+GROUP_ORDER = ["北京", "央视", "卫视", "地方", "其他", "未分组"]
+# ==============================
+
+def extract_group_title(extinf_line):
+    """从 #EXTINF 行提取 group-title 属性值，若无则返回 None"""
+    match = re.search(r'group-title="([^"]*)"', extinf_line)
+    return match.group(1) if match else None
+
+def infer_group(channel_name):
+    """根据频道名推断分组（当 group-title 缺失时使用）"""
+    name_upper = channel_name.upper()
+    if name_upper.startswith(("BTV", "BRTV", "北京")):
+        return "北京"
+    if name_upper.startswith("CCTV"):
+        return "央视"
+    if "卫视" in channel_name:
+        return "卫视"
+    # 可继续添加更多规则，例如地方台识别
+    return "其他"
+
+def sort_key(channel):
+    """用于排序的 key 函数：按 GROUP_ORDER 索引排序，不在列表中的组排在最后"""
+    group = channel['group']
+    try:
+        return GROUP_ORDER.index(group)
+    except ValueError:
+        return len(GROUP_ORDER)  # 未知组统一放最后
 
 def download_and_merge(urls):
-    all_lines = []
-    # 可以加一个集合来存储频道名，实现简单的去重
-    channel_names = set()
+    channels = []          # 存储所有频道条目
+    channel_names = set()  # 用于去重
 
     for url in urls:
         try:
             print(f"正在下载: {url}")
             response = requests.get(url, timeout=10)
             response.encoding = 'utf-8'
-            content = response.text
+            lines = response.text.splitlines()
 
-            # 简单的去重逻辑：按行处理，通过频道名去重
-            lines = content.split('\n')
             i = 0
             while i < len(lines):
-                line = lines[i]
-                # 如果这一行是频道信息（通常以 #EXTINF 开头）
+                line = lines[i].strip()
+                if not line:
+                    i += 1
+                    continue
+
                 if line.startswith('#EXTINF:'):
-                    # 尝试提取频道名
-                    match = re.search(r'tvg-name="([^"]+)"|,([^,]+)$', line)
-                    if match:
-                        channel_name = match.group(1) or match.group(2)
-                        # 如果频道名没出现过，就保留这一行和下一行的URL
-                        if channel_name not in channel_names:
-                            channel_names.add(channel_name)
-                            all_lines.append(line)
-                            if i + 1 < len(lines) and not lines[i+1].startswith('#'):
-                                all_lines.append(lines[i+1])
-                    else:
-                        # 如果没有提取到频道名，也保留（或根据你的规则处理）
-                        all_lines.append(line)
-                        if i + 1 < len(lines) and not lines[i+1].startswith('#'):
-                            all_lines.append(lines[i+1])
-                    i += 2 # 跳过下一行URL
+                    # 提取频道名
+                    name_match = re.search(r'tvg-name="([^"]+)"|,([^,]+)$', line)
+                    channel_name = None
+                    if name_match:
+                        channel_name = name_match.group(1) or name_match.group(2)
+                    
+                    if channel_name and channel_name not in channel_names:
+                        # 获取分组信息
+                        group = extract_group_title(line)
+                        if not group:
+                            group = infer_group(channel_name)
+                        
+                        channel_names.add(channel_name)
+                        if i + 1 < len(lines):
+                            url_line = lines[i+1].strip()
+                            if url_line and not url_line.startswith('#'):
+                                channels.append({
+                                    'name': channel_name,
+                                    'group': group,
+                                    'extinf': line,
+                                    'url': url_line
+                                })
+                                i += 2
+                                continue
+                    i += 1
                 else:
-                    # 如果不是#EXTINF行（比如文件头 #EXTM3U），直接添加
-                    if line and not line in all_lines:
-                        all_lines.append(line)
                     i += 1
         except Exception as e:
             print(f"下载失败 {url}: {e}")
 
-    # 确保文件以 #EXTM3U 开头
-    if all_lines and not all_lines[0].startswith('#EXTM3U'):
-        all_lines.insert(0, '#EXTM3U')
-    return '\n'.join(all_lines)
+    # 按组排序
+    channels.sort(key=sort_key)
+
+    # 生成最终内容
+    output_lines = ['#EXTM3U']
+    for ch in channels:
+        output_lines.append(ch['extinf'])
+        output_lines.append(ch['url'])
+    
+    return '\n'.join(output_lines)
 
 if __name__ == "__main__":
     merged_content = download_and_merge(SOURCE_URLS)
     with open(OUTPUT_FILE, 'w', encoding='utf-8') as f:
         f.write(merged_content)
     print(f"合并完成，已保存至 {OUTPUT_FILE}")
-
-    # 这里可以增加一个判断：如果文件内容与上次提交时相比没有变化，就退出，避免产生无效提交记录
