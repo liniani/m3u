@@ -2,50 +2,62 @@ import requests
 import re
 
 # ========== 配置区域 ==========
-# 你可以在这里添加、删除或修改源 URL，支持任意数量
 SOURCE_URLS = [
     "https://raw.githubusercontent.com/mytv-android/BRTV-Live-M3U8/refs/heads/main/iptv.m3u",
     "https://raw.githubusercontent.com/liniani/BRTV-Live-M3U8/refs/heads/main/cctv.m3u",
-    # 添加第三个源：
+    # 在这里添加更多源，例如：
     # "https://example.com/other.m3u",
-    # 添加第四个源：
-    # "https://example.com/more.m3u",
 ]
 
 OUTPUT_FILE = "live.m3u"
 
-# 分组显示顺序：北京 → 央视 → 卫视 → 地方 → 其他 → 未分组
+# 分组顺序（北京置顶）
 GROUP_ORDER = ["北京", "央视", "卫视", "地方", "其他", "未分组"]
+
+# 组名映射：将源中的原始组名统一到标准组
+GROUP_MAPPING = {
+    "北京": "北京",
+    "BRTV": "北京",
+    "BTV": "北京",
+    "央视": "央视",
+    "CCTV": "央视",
+    "卫视": "卫视",
+    "地方": "地方",
+    # 可根据需要继续添加
+}
 # ==============================
 
 def extract_group_title(extinf_line):
-    """从 #EXTINF 行提取 group-title 属性值，若无则返回 None"""
+    """提取 group-title 属性值"""
     match = re.search(r'group-title="([^"]*)"', extinf_line)
     return match.group(1) if match else None
 
+def normalize_group(group_name):
+    """将原始组名映射为标准组名，若无映射则返回原值"""
+    return GROUP_MAPPING.get(group_name, group_name)
+
 def infer_group(channel_name):
-    """根据频道名推断分组（当 group-title 缺失时使用）"""
+    """根据频道名推断分组（当无 group-title 时使用）"""
     name_upper = channel_name.upper()
-    if name_upper.startswith(("BTV", "BRTV", "北京")):
+    if any(key in name_upper for key in ["北京", "BRTV", "BTV"]):
         return "北京"
     if name_upper.startswith("CCTV"):
         return "央视"
     if "卫视" in channel_name:
         return "卫视"
-    # 可继续添加更多规则，例如地方台识别
     return "其他"
 
 def sort_key(channel):
-    """用于排序的 key 函数：按 GROUP_ORDER 索引排序，不在列表中的组排在最后"""
+    """排序：按 GROUP_ORDER 顺序，未知组放最后"""
     group = channel['group']
     try:
         return GROUP_ORDER.index(group)
     except ValueError:
-        return len(GROUP_ORDER)  # 未知组统一放最后
+        return len(GROUP_ORDER)
 
 def download_and_merge(urls):
-    channels = []          # 存储所有频道条目
-    channel_names = set()  # 用于去重
+    channels = []
+    channel_names = set()
 
     for url in urls:
         try:
@@ -67,13 +79,21 @@ def download_and_merge(urls):
                     channel_name = None
                     if name_match:
                         channel_name = name_match.group(1) or name_match.group(2)
-                    
+
                     if channel_name and channel_name not in channel_names:
-                        # 获取分组信息
+                        # 1. 尝试从源中提取 group-title
                         group = extract_group_title(line)
-                        if not group:
-                            group = infer_group(channel_name)
-                        
+                        if group:
+                            group = normalize_group(group)  # 映射
+                        else:
+                            group = infer_group(channel_name)  # 推断
+
+                        # 强制后处理：若频道名明显属于北京但组不对，强制设为北京
+                        if "北京" in channel_name and group != "北京":
+                            group = "北京"
+
+                        print(f"发现频道: {channel_name} -> 组: {group}")  # 调试输出
+
                         channel_names.add(channel_name)
                         if i + 1 < len(lines):
                             url_line = lines[i+1].strip()
@@ -95,12 +115,12 @@ def download_and_merge(urls):
     # 按组排序
     channels.sort(key=sort_key)
 
-    # 生成最终内容
+    # 生成输出
     output_lines = ['#EXTM3U']
     for ch in channels:
         output_lines.append(ch['extinf'])
         output_lines.append(ch['url'])
-    
+
     return '\n'.join(output_lines)
 
 if __name__ == "__main__":
